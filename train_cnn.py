@@ -1,67 +1,94 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
+from tensorflow.keras import layers, models, Input
 from tensorflow.keras.utils import to_categorical
 from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, classification_report
 
 # --- Configuration ---
-# Must match the size of X_reduced.csv
-N_SELECTED_FEATURES = 100 
-N_CLASSES = 4 
+DATASET_NAME = "PhysioNet2016" # Change to "PASCAL" to train on PASCAL data
+# DATASET_NAME = "PASCAL"
+
+if DATASET_NAME == "PhysioNet2016":
+    N_CLASSES = 2
+    CLASS_NAMES = ["Healthy", "Unhealthy"]
+elif DATASET_NAME == "PASCAL":
+    N_CLASSES = 4
+    CLASS_NAMES = ["Normal", "Murmur", "ExtraHLS", "Artifact"]
+
 RANDOM_SEED = 42
 
-# Define the class names based on your previous mapping (for clear output)
-CLASS_NAMES = ["Normal", "Murmur", "ExtraHLS", "Artifact"] 
-
-def load_data(X_file, y_file):
-    """Loads feature data and labels from CSV files."""
+def load_data():
+    """Loads feature data and labels from NPY files."""
     try:
-        X = np.loadtxt(X_file, delimiter=",")
-        y = np.loadtxt(y_file, delimiter=",", dtype=int)
-        print(f"✅ Data loaded successfully. X shape: {X.shape}, y shape: {y.shape}")
-        return X, y
+        prefix = DATASET_NAME
+        X_spec = np.load(f"outputs/{prefix}_X_spectrogram.npy")
+        X_mfcc = np.load(f"outputs/{prefix}_X_mfcc.npy")
+        y = np.load(f"outputs/{prefix}_y_dataset.npy")
+        print(f"✅ Data loaded for {DATASET_NAME}.")
+        print(f"  Spectrograms: {X_spec.shape}")
+        print(f"  MFCCs: {X_mfcc.shape}")
+        print(f"  Labels: {y.shape}")
+        return X_spec, X_mfcc, y
     except FileNotFoundError as e:
-        print(f"❌ Error: Required file not found. Ensure you ran the ReliefF script first.")
-        print(f"Missing file: {e.filename}")
-        return None, None
+        print(f"❌ Error: Data file not found for {DATASET_NAME}. Run main_physionet.py with correct dataset selected.")
+        return None, None, None
 
-def create_cnn_model(input_length, num_classes):
+def create_2d_cnn_model(input_shape, num_classes):
     """
-    Implements the 1D CNN architecture based on the paper (Table 1).
-    Input Shape: (input_length, 1)
+    Implements the 2D CNN architecture for Spectrograms.
+    Refined for higher accuracy (BatchNormalization, Dropout, More Filters).
     """
-    model = Sequential([
-        # ----------------- Block 1 -----------------
-        # Conv Lyer 1: 64x1 kernel 1, stride 1
-        Conv1D(filters=64, kernel_size=1, strides=1, activation='relu', input_shape=(input_length, 1)),
-        MaxPooling1D(pool_size=2, strides=2),  # Output length: 100 -> 50
-
-        # ----------------- Block 2 -----------------
-        # Conv Lyer 2: 32x1 kernel 1, stride 1
-        Conv1D(filters=32, kernel_size=1, strides=1, activation='relu'),
-        MaxPooling1D(pool_size=2, strides=2),  # Output length: 50 -> 25
-
-        # ----------------- Block 3 -----------------
-        # Conv Lyer 3: 32x1 kernel 1, stride 1
-        Conv1D(filters=32, kernel_size=1, strides=1, activation='relu'),
-        MaxPooling1D(pool_size=2, strides=2),  # Output length: 25 -> 12 (due to truncation)
-
-        # ----------------- Block 4 -----------------
-        # Conv Lyer 4: 16x1 kernel 1, stride 1
-        Conv1D(filters=16, kernel_size=1, strides=1, activation='relu'),
-        MaxPooling1D(pool_size=2, strides=2),  # Output length: 12 -> 6
-
-        # ----------------- Fully Connected Layers -----------------
-        Flatten(), # Flattened size: 6 * 16 = 96 units
-
-        Dense(64, activation='relu'), # Fc_1: 64 neurons
-        Dropout(0.5),                 # Drop_1: 50% dropout rate
-        Dense(32, activation='relu'), # Fc_2: 32 neurons
+    model = models.Sequential([
+        # Block 1
+        layers.Conv2D(32, (3, 3), padding='same', input_shape=input_shape),
+        layers.BatchNormalization(),
+        layers.Activation('relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.2),
         
-        # Output Layer: Softmax for 4-class classification
-        Dense(num_classes, activation='softmax') 
+        # Block 2
+        layers.Conv2D(64, (3, 3), padding='same'),
+        layers.BatchNormalization(),
+        layers.Activation('relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.2),
+        
+        # Block 3
+        layers.Conv2D(128, (3, 3), padding='same'),
+        layers.BatchNormalization(),
+        layers.Activation('relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.3),
+        
+        # Block 4 (Added for deeper feature extraction)
+        layers.Conv2D(256, (3, 3), padding='same'),
+        layers.BatchNormalization(),
+        layers.Activation('relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Dropout(0.3),
+        
+        # Dense Layers
+        layers.Flatten(),
+        layers.Dense(512, activation='relu'),
+        layers.BatchNormalization(),
+        layers.Dropout(0.5),
+        
+        layers.Dense(256, activation='relu'),
+        layers.Dropout(0.5),
+        
+        # Output Layer
+        layers.Dense(num_classes, activation='softmax')
     ])
+    
+    # Using a lower learning rate for stability
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.0005)
+    
+    model.compile(optimizer=optimizer,
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
     return model
 
 # ----------------------------------------------------------------------
@@ -71,33 +98,86 @@ def create_cnn_model(input_length, num_classes):
 if __name__ == "__main__":
     
     # 1. Load Data
-    X_reduced, y_dataset = load_data("outputs/X_reduced.csv", "outputs/y_dataset.csv")
+    X_spec, X_mfcc, y = load_data()
+    if X_spec is None:
+        exit()
 
-    if X_reduced is None:
-        exit() # Exit if loading failed
-
-    # 2. Reshape and Encode Data
+    # 2. Prepare Data
+    # One-hot encode labels for CNN
+    y_encoded = to_categorical(y, num_classes=N_CLASSES)
     
-    # CNNs expect a 3D input: (samples, time_steps/length, channels)
-    # Our data is (samples, 100). We add a channel dimension of 1.
-    X_reshaped = X_reduced.reshape(X_reduced.shape[0], N_SELECTED_FEATURES, 1)
-    
-    # Convert integer labels to one-hot encoding (e.g., 0 -> [1, 0, 0, 0])
-    y_encoded = to_categorical(y_dataset, num_classes=N_CLASSES)
-
-    print(f"Data prepared. X_reshaped shape: {X_reshaped.shape}")
-    print(f"y_encoded shape: {y_encoded.shape}")
-
-    # 3. Split Data into Training and Testing Sets
-    # A standard 70/30 split is often used in this domain
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_reshaped, y_encoded, test_size=0.3, random_state=RANDOM_SEED, stratify=y_encoded
+    # 3. Split Data (Stratified)
+    # We need to split both Spectrograms and MFCCs with the same indices
+    X_spec_train, X_spec_test, X_mfcc_train, X_mfcc_test, y_train, y_test = train_test_split(
+        X_spec, X_mfcc, y_encoded, test_size=0.3, random_state=RANDOM_SEED, stratify=y
     )
+    
+    # Convert one-hot back to integers for SVM
+    y_train_int = np.argmax(y_train, axis=1)
+    y_test_int = np.argmax(y_test, axis=1)
 
-    print(f"Training set size: {X_train.shape[0]} samples")
-    print(f"Testing set size: {X_test.shape[0]} samples")
+    print(f"Train size: {len(y_train)}, Test size: {len(y_test)}")
 
-    # 4. Create and Compile Model
+    # ---------------------------------------------------------
+    #   A. Train CNN (Spectrograms)
+    # ---------------------------------------------------------
+    print("\n--- Training CNN (Spectrograms) ---")
+    cnn_model = create_2d_cnn_model(input_shape=X_spec.shape[1:], num_classes=N_CLASSES)
+    
+    # Callbacks for better training
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
+    early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+    
+    history = cnn_model.fit(
+        X_spec_train, y_train,
+        epochs=50,
+        batch_size=32,
+        validation_data=(X_spec_test, y_test),
+        callbacks=[reduce_lr, early_stop],
+        verbose=1
+    )
+    
+    # Get CNN Probabilities
+    cnn_probs_test = cnn_model.predict(X_spec_test)
+    cnn_pred_test = np.argmax(cnn_probs_test, axis=1)
+    acc_cnn = accuracy_score(y_test_int, cnn_pred_test)
+    print(f"CNN Accuracy: {acc_cnn:.4f}")
+
+    # ---------------------------------------------------------
+    #   B. Train SVM (MFCCs)
+    # ---------------------------------------------------------
+    print("\n--- Training SVM (MFCCs) ---")
+    # Scale MFCC features
+    scaler = StandardScaler()
+    X_mfcc_train_scaled = scaler.fit_transform(X_mfcc_train)
+    X_mfcc_test_scaled = scaler.transform(X_mfcc_test)
+    
+    # Tuned SVM
+    svm_model = SVC(C=10, kernel='rbf', probability=True, random_state=RANDOM_SEED)
+    svm_model.fit(X_mfcc_train_scaled, y_train_int)
+    
+    # Get SVM Probabilities
+    svm_probs_test = svm_model.predict_proba(X_mfcc_test_scaled)
+    svm_pred_test = np.argmax(svm_probs_test, axis=1)
+    acc_svm = accuracy_score(y_test_int, svm_pred_test)
+    print(f"SVM Accuracy: {acc_svm:.4f}")
+
+    # ---------------------------------------------------------
+    #   C. Ensemble Fusion
+    # ---------------------------------------------------------
+    print("\n--- Ensemble Fusion (Weighted Average) ---")
+    
+    # Fusion Rule: P_final = alpha * P_cnn + (1 - alpha) * P_svm
+    alpha = 0.6 
+    
+    final_probs = (alpha * cnn_probs_test) + ((1 - alpha) * svm_probs_test)
+    final_pred = np.argmax(final_probs, axis=1)
+    
+    acc_fusion = accuracy_score(y_test_int, final_pred)
+    print(f"Fusion Accuracy: {acc_fusion:.4f}")
+    
+    print("\nClassification Report (Fusion):")
+    print(classification_report(y_test_int, final_pred, target_names=CLASS_NAMES))
     model = create_cnn_model(N_SELECTED_FEATURES, N_CLASSES)
 
     # Use common settings for multi-class classification:

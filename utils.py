@@ -315,3 +315,69 @@ class Utils:
         selected = sorted_idx[:n_selected_features]
 
         return selected, weights
+
+    # ---------------------------------------------------------
+    #   SPECTROGRAM (For CNN) - Log-Mel Spectrogram
+    # ---------------------------------------------------------
+    @staticmethod
+    def get_spectrogram(audio, sr=2000, n_fft=1024, hop_length=256, n_mels=128, target_shape=(128, 128)):
+        """
+        Generates a normalized Log-Mel Spectrogram image from the audio signal.
+        """
+        import librosa
+        import cv2
+        
+        # Compute Mel Spectrogram
+        mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels)
+        
+        # Convert to log scale (dB)
+        spectrogram = librosa.power_to_db(mel_spec, ref=np.max)
+        
+        # Resize to target shape (Height, Width)
+        spectrogram_resized = cv2.resize(spectrogram, target_shape, interpolation=cv2.INTER_CUBIC)
+        
+        # Add channel dimension (H, W, 1)
+        spectrogram_resized = np.expand_dims(spectrogram_resized, axis=-1)
+        
+        # Normalize to [0, 1]
+        mn = spectrogram_resized.min()
+        mx = spectrogram_resized.max()
+        if mx - mn > 0:
+            spectrogram_resized = (spectrogram_resized - mn) / (mx - mn)
+            
+        return spectrogram_resized
+
+    # ---------------------------------------------------------
+    #   MFCC (For SVM/Ensemble)
+    # ---------------------------------------------------------
+    @staticmethod
+    def get_mfcc(audio, sr=2000, n_mfcc=13):
+        """
+        Extracts MFCC features and returns the mean vector.
+        """
+        import librosa
+        # Extract MFCCs
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
+        # Return mean across time (1D vector)
+        return np.mean(mfccs.T, axis=0)
+
+    # ---------------------------------------------------------
+    #   DATA AUGMENTATION
+    # ---------------------------------------------------------
+    @staticmethod
+    def augment_audio(audio, sr):
+        """
+        Applies random augmentations: Noise injection, Time shifting.
+        """
+        # 1. Noise Injection
+        if random.random() < 0.5:
+            noise_amp = 0.005 * np.random.uniform() * np.amax(audio)
+            audio = audio + noise_amp * np.random.normal(size=audio.shape[0])
+            
+        # 2. Time Shifting
+        if random.random() < 0.5:
+            shift_amt = int(random.random() * sr * 0.5) # up to 0.5 sec
+            direction = random.choice([-1, 1])
+            audio = np.roll(audio, direction * shift_amt)
+            
+        return audio
