@@ -1,18 +1,22 @@
 import os
 import sys
-import csv
 import datetime
 import numpy as np
 import librosa
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA # Import PCA
 import matplotlib.pyplot as plt
 
-from utils import Utils   # Your utility class
+# Import your utility class
+from utils import Utils
 
 
 # ============================================================
-#                ENABLE TERMINAL PRINT LOGGING
+#               ENABLE TERMINAL PRINT LOGGING
 # ============================================================
+
+# Ensure the 'outputs' directory exists for logs and results
+os.makedirs('outputs', exist_ok=True)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 LOG_FILE = f"outputs/run_log_{timestamp}.txt"
@@ -37,7 +41,7 @@ sys.stdout = Logger(LOG_FILE)
 
 
 # ============================================================
-#                 GLOBAL CONFIGURATION
+#                GLOBAL CONFIGURATION
 # ============================================================
 
 # ---- Dataset Paths ----
@@ -55,13 +59,13 @@ label_map = {
 inv_label_map = {v: k.replace("Atraining_", "") for k, v in label_map.items()}
 
 # ---- Audio + Feature Extraction Parameters ----
-SR = 4000                    # Sampling rate
-DURATION_SEC = 9.0           # Standard length for all audio
-R_NEIGHBORS = 4              # LBP/LTP radius
-THRESHOLD = 0.5              # LTP threshold
-LOWCUT = 25                  # High-pass band
-HIGHCUT = 400                # Low-pass band
-FILTER_ORDER = 5             # Butterworth order
+SR = 4000                      # Sampling rate
+DURATION_SEC = 9.0             # Standard length for all audio
+R_NEIGHBORS = 4                # LBP/LTP radius (P=2R=8 neighbors for paper)
+THRESHOLD = 0.5                # LTP threshold
+LOWCUT = 25                    # High-pass band (Hz)
+HIGHCUT = 400                  # Low-pass band (Hz)
+FILTER_ORDER = 5               # Butterworth order
 
 # ---- Derived Feature Dimensions ----
 target_signal_length = int(SR * DURATION_SEC)
@@ -75,9 +79,8 @@ N_SELECTED_FEATURES = 100
 RELIEF_SEED = 42
 
 
-
 # ============================================================
-#                        MAIN SCRIPT
+#                      MAIN SCRIPT
 # ============================================================
 
 if __name__ == "__main__":
@@ -98,7 +101,7 @@ if __name__ == "__main__":
     skipped_count = 0
 
     # -------------------------------------------------------
-    #     Scan folders + Extract Features
+    #   Scan folders + Extract Features
     # -------------------------------------------------------
     for folder_name in sorted(os.listdir(dataset_root)):
         folder_path = os.path.join(dataset_root, folder_name)
@@ -140,8 +143,8 @@ if __name__ == "__main__":
                         print(f"ERROR processing {filepath}: {e}")
                         skipped_count += 1
         else:
-            if os.path.isdir(folder_path):
-                print(f"Skipping: {folder_name} (Not a valid class)")
+            if os.path.isdir(folder_path): # Only print if it's actually a directory
+                print(f"Skipping: {folder_name} (Not a valid class or not a directory)")
 
     # Convert to arrays
     X_dataset = np.array(all_features)
@@ -156,23 +159,21 @@ if __name__ == "__main__":
     print("\nClass Distribution:")
     unique_labels, counts = np.unique(y_dataset, return_counts=True)
     for lbl, count in zip(unique_labels, counts):
-        print(f"  {inv_label_map[lbl]}: {count}")
+        print(f"  {inv_label_map.get(lbl, f'Unknown({lbl})')}: {count}") # Use .get for robustness
 
     print("--------------------------------------\n")
 
 
-
     # ============================================================
-    #                SAVE RAW FEATURES AS CSV
+    #                 SAVE RAW FEATURES AS CSV
     # ============================================================
     np.savetxt("outputs/X_dataset.csv", X_dataset, delimiter=",")
     np.savetxt("outputs/y_dataset.csv", y_dataset, delimiter=",")
     print("Saved X_dataset.csv + y_dataset.csv to outputs/")
 
 
-
     # ============================================================
-    #                STANDARDIZE THE FEATURES
+    #                 STANDARDIZE THE FEATURES
     # ============================================================
     print("\n--- Standardizing Features ---")
     scaler = StandardScaler()
@@ -180,9 +181,8 @@ if __name__ == "__main__":
     print("Feature scaling complete.")
 
 
-
     # ============================================================
-    #                APPLY RELIEFF
+    #                 APPLY RELIEFF
     # ============================================================
     print("\n--- Running ReliefF Feature Selection ---")
     print(f"Using {RELIEF_N_NEIGHBORS} neighbors, {RELIEF_N_ITERATIONS} iterations")
@@ -201,16 +201,15 @@ if __name__ == "__main__":
 
 
     # ============================================================
-    #                SAVE RELIEFF outputs
+    #                 SAVE RELIEFF outputs
     # ============================================================
     np.savetxt("outputs/feature_weights.csv", feature_weights, delimiter=",")
     np.savetxt("outputs/selected_feature_indices.csv", selected_indices, delimiter=",")
     print("Saved ReliefF results to outputs/")
 
 
-
     # ============================================================
-    #                PLOT FEATURE WEIGHTS
+    #                 PLOT FEATURE WEIGHTS
     # ============================================================
     plt.figure(figsize=(14, 6))
     plt.bar(range(len(feature_weights)), feature_weights)
@@ -219,12 +218,12 @@ if __name__ == "__main__":
     plt.ylabel("Weight")
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.tight_layout()
+    plt.savefig(f"outputs/reliefF_feature_weights_{timestamp}.png") # Save plot
     plt.show()
 
 
-
     # ============================================================
-    #                REDUCE DATASET
+    #                 REDUCE DATASET
     # ============================================================
     X_reduced = X_scaled[:, selected_indices]
     print(f"Reduced dataset shape: {X_reduced.shape}")
@@ -235,5 +234,45 @@ if __name__ == "__main__":
     print("Saved X_reduced.csv to outputs/")
 
 
+    # ============================================================
+    #                 2D Feature Visualization (PCA)
+    # ============================================================
+    print("\n--- Performing PCA for 2D Visualization ---")
+    pca = PCA(n_components=2, random_state=RELIEF_SEED) # Use same seed for consistency
+    X_pca = pca.fit_transform(X_reduced)
+    
+    print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
+    print(f"Total explained variance by 2 components: {pca.explained_variance_ratio_.sum():.2f}")
+
+    plt.figure(figsize=(10, 8))
+    
+    # Define colors for each class to match the paper's style as much as possible
+    colors = ['gold', 'red', 'blue', 'purple'] # Matching approximate colors from the image
+    
+    for label_val in sorted(np.unique(y_dataset)):
+        # Filter data for the current label
+        mask = (y_dataset == label_val)
+        
+        # Plot only if there are samples for this label
+        if np.any(mask):
+            plt.scatter(
+                X_pca[mask, 0], 
+                X_pca[mask, 1],
+                color=colors[label_val % len(colors)], # Cycle colors if more classes than defined
+                label=inv_label_map.get(label_val, f'Unknown({label_val})'),
+                alpha=0.7,
+                s=30 # Marker size
+            )
+
+    plt.title("2D Representation of Features (PCA)")
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.legend(title="Classes")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.tight_layout()
+    plt.savefig(f"outputs/2d_pca_plot_{timestamp}.png")
+    plt.show()
+
+    print("\n--- 2D PCA plot generated and saved to outputs/ ---")
     print("\n=========== PROCESS COMPLETE ===========")
     print("Your data is ready for CNN training.")

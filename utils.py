@@ -1,4 +1,3 @@
-
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 from sklearn.neighbors import NearestNeighbors
@@ -11,7 +10,7 @@ class Utils:
     and ReliefF feature-ranking.
     """
     # ---------------------------------------------------------
-    #  BUTTERWORTH FILTER
+    #   BUTTERWORTH FILTER
     # ---------------------------------------------------------
     @staticmethod
     def butter_filter(signal, sr, lowcut=None, highcut=None, order=5):
@@ -29,26 +28,34 @@ class Utils:
             np.ndarray: Filtered signal (same length as input).
         """
         nyquist = 0.5 * sr
-        low = lowcut / nyquist if lowcut is not None else 0.001
-        high = highcut / nyquist if highcut is not None else 0.999
-
+        
+        # Determine filter type and normalized cutoff frequencies
         if lowcut is not None and highcut is not None:
             btype = 'band'
-            Wn = [low, high]
+            Wn = [lowcut / nyquist, highcut / nyquist]
+            # Validate bandpass frequencies
+            if not (0 < Wn[0] < Wn[1] < 1):
+                raise ValueError(f"Bandpass frequencies must be 0 < low < high < 1. Got: {Wn}")
         elif highcut is not None:
             btype = 'lowpass'
-            Wn = high
+            Wn = highcut / nyquist
+            # Validate lowpass frequency
+            if not (0 < Wn < 1):
+                raise ValueError(f"Lowpass cutoff frequency must be 0 < Wn < 1. Got: {Wn}")
         elif lowcut is not None:
             btype = 'highpass'
-            Wn = low
+            Wn = lowcut / nyquist
+            # Validate highpass frequency
+            if not (0 < Wn < 1):
+                raise ValueError(f"Highpass cutoff frequency must be 0 < Wn < 1. Got: {Wn}")
         else:
-            raise ValueError("At least one of lowcut or highcut must be provided.")
+            raise ValueError("At least one of lowcut or highcut must be provided for filtering.")
 
         sos = butter(order, Wn, btype=btype, output='sos')
         return sosfiltfilt(sos, signal)
 
     # ---------------------------------------------------------
-    #  TRUNCATE OR PAD
+    #   TRUNCATE OR PAD
     # ---------------------------------------------------------
     @staticmethod
     def truncate_or_pad(signal, target_length):
@@ -69,7 +76,7 @@ class Utils:
             return np.pad(signal, (0, pad_len), mode='constant')
 
     # ---------------------------------------------------------
-    #  LBP 1D
+    #   LBP 1D
     # ---------------------------------------------------------
     @staticmethod
     def lbp_1d(signal, R):
@@ -110,7 +117,7 @@ class Utils:
         return bits @ weights
 
     # ---------------------------------------------------------
-    #  LTP 1D
+    #   LTP 1D
     # ---------------------------------------------------------
     @staticmethod
     def ltp_1d(signal, R, t):
@@ -155,11 +162,11 @@ class Utils:
         return upper_vals, lower_vals
 
     # ---------------------------------------------------------
-    #  FULL FEATURE EXTRACTION PIPELINE
+    #   FULL FEATURE EXTRACTION PIPELINE
     # ---------------------------------------------------------
     @staticmethod
     def extract_features(signal, sr, R=4, threshold=0.5,
-                         lowcut=25, highcut=400, order=5, duration_sec=9.0):
+                             lowcut=25, highcut=400, order=5, duration_sec=9.0):
         """
         Full pipeline: signal → filtering → LBP + LTP → stacked → flattened.
 
@@ -181,9 +188,9 @@ class Utils:
         signal = Utils.truncate_or_pad(signal, target_length)
 
         filtered = Utils.butter_filter(signal, sr,
-                                       lowcut=lowcut,
-                                       highcut=highcut,
-                                       order=order)
+                                        lowcut=lowcut,
+                                        highcut=highcut,
+                                        order=order)
 
         lbp = Utils.lbp_1d(filtered, R)
         ltp_up, ltp_down = Utils.ltp_1d(filtered, R, threshold)
@@ -198,7 +205,7 @@ class Utils:
         return X.flatten()
 
     # ---------------------------------------------------------
-    #  RELIEFF
+    #   RELIEFF
     # ---------------------------------------------------------
     @staticmethod
     def reliefF(X, y, n_neighbors=10, n_iterations=100, seed=None):
@@ -270,11 +277,11 @@ class Utils:
         return weights
 
     # ---------------------------------------------------------
-    #  SELECT TOP RELIEFF FEATURES
+    #   SELECT TOP RELIEFF FEATURES
     # ---------------------------------------------------------
     @staticmethod
     def select_features_reliefF(X, y, n_selected_features,
-                                n_neighbors=10, n_iterations=100, seed=None):
+                                 n_neighbors=10, n_iterations=100, seed=None):
         """
         Select top-N features using ReliefF ranking.
 
