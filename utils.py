@@ -99,20 +99,31 @@ class Utils:
 
         centers = signal[R : N - R]
 
+        # Neighbors: P = 2*R
+        # We collect R neighbors to the left and R neighbors to the right
+        # left_blocks shape: (M, R)
         left_blocks = np.stack(
             [signal[R - k - 1 : N - R - k - 1] for k in range(R)],
             axis=1
         )
 
+        # right_blocks shape: (M, R)
         right_blocks = np.stack(
             [signal[R + k + 1 : N - R + k + 1] for k in range(R)],
             axis=1
         )
 
+        # Concatenate to get all 2R neighbors
+        # Order: [left_R, ..., left_1, right_1, ..., right_R]
         neighbors = np.concatenate([left_blocks, right_blocks], axis=1)
+        
+        # Compare neighbors with center
         bits = (neighbors >= centers[:, None]).astype(np.uint8)
-        bits = bits[:, ::-1]
-
+        
+        # Convert bits to decimal
+        # We want the first neighbor (left-most) to be the MSB or LSB?
+        # Standard LBP usually assigns weights 2^0, 2^1, ...
+        # Let's assign 2^0 to the first column, 2^1 to the second, etc.
         weights = (1 << np.arange(2 * R))
         return bits @ weights
 
@@ -146,15 +157,24 @@ class Utils:
         left = np.stack([signal[R - k - 1 : N - R - k - 1] for k in range(R)], axis=1)
         right = np.stack([signal[R + k + 1 : N - R + k + 1] for k in range(R)], axis=1)
 
-        neighbors = np.concatenate([left[:, ::-1], right], axis=1)
+        neighbors = np.concatenate([left, right], axis=1)
 
         lower_bound = centers[:, None] - t
         upper_bound = centers[:, None] + t
 
+        # Ternary coding:
+        # neighbor > center + t  --> +1
+        # neighbor < center - t  --> -1
+        # else                   -->  0
+        
+        # Split into Upper and Lower binary patterns
+        # Upper: 1 if neighbor > center + t, else 0
         upper_bits = (neighbors > upper_bound).astype(np.uint8)
+        
+        # Lower: 1 if neighbor < center - t, else 0
         lower_bits = (neighbors < lower_bound).astype(np.uint8)
 
-        weights = 2 ** np.arange(2 * R - 1, -1, -1)
+        weights = (1 << np.arange(2 * R))
 
         upper_vals = upper_bits @ weights
         lower_vals = lower_bits @ weights
@@ -197,11 +217,28 @@ class Utils:
 
         expected_L = max(0, target_length - 2 * R)
 
+        # Ensure all are same length (should be if logic is correct)
         lbp_ = Utils.truncate_or_pad(lbp, expected_L)
         ltp_up_ = Utils.truncate_or_pad(ltp_up, expected_L)
         ltp_down_ = Utils.truncate_or_pad(ltp_down, expected_L)
 
+        # Stack: [LBP, LTP_Upper, LTP_Lower]
+        # Shape: (3, L)
         X = np.stack([lbp_, ltp_up_, ltp_down_], axis=0)
+        
+        # Flatten: (3*L,)
+        # We want to preserve the temporal structure for 1D CNN?
+        # The paper says "1D CNN with 1D-LBP and 1D-LTP features".
+        # Usually this means the input to CNN is (L, 3) or (3, L).
+        # But for ReliefF (feature selection), we need a 1D vector per sample.
+        # So flattening is correct for Feature Selection.
+        # Later for CNN, we might reshape it back or use 1D CNN on the flattened vector 
+        # (treating it as a long sequence) or reshape to (L, 3).
+        # Given the "ReliefF" step, it selects "top features". 
+        # If we select random features from the flattened vector, we lose temporal structure.
+        # However, the prompt says "Relief feature selection then a 1D CNN".
+        # This implies we select specific *points* in the LBP/LTP streams that are most discriminative.
+        
         return X.flatten()
 
     # ---------------------------------------------------------
@@ -231,6 +268,7 @@ class Utils:
 
         weights = np.zeros(n_features)
 
+        # Use all samples for NN search
         nn = NearestNeighbors(n_neighbors=n_neighbors + 1)
         nn.fit(X)
 
@@ -240,6 +278,7 @@ class Utils:
             class_R = y[idx]
 
             distances, indices = nn.kneighbors(R_i.reshape(1, -1))
+            # indices[0][0] is the point itself
             neighbor_idx = indices[0][1:]
             neighbor_classes = y[neighbor_idx]
 
@@ -252,28 +291,38 @@ class Utils:
                     miss_idx = neighbor_idx[neighbor_classes == cls][:n_neighbors]
                     misses_by_class[cls] = X[miss_idx]
 
-            if len(hits) == 0 or any(len(v) == 0 for v in misses_by_class.values()):
+            # Skip if not enough neighbors
+            if len(hits) == 0:
                 continue
 
-            for f_idx in range(n_features):
-                diff_hit = np.mean(np.abs(R_i[f_idx] - hits[:, f_idx])) if len(hits) > 0 else 0
+            # Update weights
+            # W[A] = W[A] - diff(A, R, H) + sum(P(C)*diff(A, R, M(C)))
+            
+            # Diff Hit
+            diff_hit = np.mean(np.abs(R_i - hits), axis=0) # Shape (n_features,)
 
-                diff_miss_sum = 0
-                for cls in unique_classes:
-                    if cls == class_R:
-                        continue
-                    P = (np.sum(y == cls) / n_samples)
-                    P_ref = (np.sum(y == class_R) / n_samples)
-                    P_factor = P / (1 - P_ref)
+            diff_miss_sum = np.zeros(n_features)
+            
+            for cls in unique_classes:
+                if cls == class_R:
+                    continue
+                
+                misses = misses_by_class.get(cls)
+                if misses is None or len(misses) == 0:
+                    continue
 
-                    misses = misses_by_class[cls]
-                    diff_miss = np.mean(np.abs(R_i[f_idx] - misses[:, f_idx]))
-                    diff_miss_sum += P_factor * diff_miss
+                P_cls = (np.sum(y == cls) / n_samples)
+                P_ref = (np.sum(y == class_R) / n_samples)
+                # Normalizing probability factor
+                P_factor = P_cls / (1 - P_ref + 1e-10)
 
-                weights[f_idx] += diff_miss_sum - diff_hit
+                diff_miss = np.mean(np.abs(R_i - misses), axis=0)
+                diff_miss_sum += P_factor * diff_miss
+
+            weights += diff_miss_sum - diff_hit
 
         weights /= n_iterations
-        weights[weights < 0] = 0
+        # weights[weights < 0] = 0 # ReliefF weights can be negative (irrelevant/redundant)
         return weights
 
     # ---------------------------------------------------------
@@ -315,51 +364,6 @@ class Utils:
         selected = sorted_idx[:n_selected_features]
 
         return selected, weights
-
-    # ---------------------------------------------------------
-    #   SPECTROGRAM (For CNN) - Log-Mel Spectrogram
-    # ---------------------------------------------------------
-    @staticmethod
-    def get_spectrogram(audio, sr=2000, n_fft=1024, hop_length=256, n_mels=128, target_shape=(128, 128)):
-        """
-        Generates a normalized Log-Mel Spectrogram image from the audio signal.
-        """
-        import librosa
-        import cv2
-        
-        # Compute Mel Spectrogram
-        mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels)
-        
-        # Convert to log scale (dB)
-        spectrogram = librosa.power_to_db(mel_spec, ref=np.max)
-        
-        # Resize to target shape (Height, Width)
-        spectrogram_resized = cv2.resize(spectrogram, target_shape, interpolation=cv2.INTER_CUBIC)
-        
-        # Add channel dimension (H, W, 1)
-        spectrogram_resized = np.expand_dims(spectrogram_resized, axis=-1)
-        
-        # Normalize to [0, 1]
-        mn = spectrogram_resized.min()
-        mx = spectrogram_resized.max()
-        if mx - mn > 0:
-            spectrogram_resized = (spectrogram_resized - mn) / (mx - mn)
-            
-        return spectrogram_resized
-
-    # ---------------------------------------------------------
-    #   MFCC (For SVM/Ensemble)
-    # ---------------------------------------------------------
-    @staticmethod
-    def get_mfcc(audio, sr=2000, n_mfcc=13):
-        """
-        Extracts MFCC features and returns the mean vector.
-        """
-        import librosa
-        # Extract MFCCs
-        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
-        # Return mean across time (1D vector)
-        return np.mean(mfccs.T, axis=0)
 
     # ---------------------------------------------------------
     #   DATA AUGMENTATION
