@@ -1,331 +1,525 @@
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.utils import to_categorical
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, classification_report, confusion_matrix, roc_curve, auc
-from sklearn.utils.class_weight import compute_class_weight
-import matplotlib.pyplot as plt
-import seaborn as sns1
+"""
+Training script for Heart Sound Classification using 1D-LBP and 1D-LTP features
+Based on: "Heart sounds classification using CNN with 1D-LBP and 1D-LTP features"
+Er, Mehmet Bilal - Applied Acoustics 2021
+
+Uses 10-fold cross-validation as specified in the paper
+"""
 import os
-import sys
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import (
+    classification_report, confusion_matrix, 
+    accuracy_score, precision_score, recall_score, f1_score
+)
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
+import tensorflow as tf
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
 
-# ============================================================
-#               CONFIGURATION & USER INPUT
-# ============================================================
+from config import (
+    EPOCHS, BATCH_SIZE, CLASSES, MODEL_SAVE_PATH, 
+    RANDOM_SEED, NUM_CLASSES, N_FOLDS
+)
+K_FOLDS = N_FOLDS  # Alias for clarity
+from data_preprocessing import load_dataset
+from model import get_model, get_callbacks
 
-print("\n======================================================")
-print("   Heart Sound Classification - CNN Training")
-print("======================================================\n")
 
-print("Select Dataset to Train on:")
-print("  [1] PhysioNet2016")
-print("  [2] PASCAL")
+def set_seeds(seed=RANDOM_SEED):
+    """Set random seeds for reproducibility"""
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
 
-choice = input("Enter choice (1 or 2): ").strip()
 
-if choice == "1":
-    DATASET_NAME = "PhysioNet2016"
-    N_CLASSES = 2
-    CLASS_NAMES = ["Healthy", "Unhealthy"]
-    X_FILE = "outputs/PhysioNet_X_reduced.csv"
-    Y_FILE = "outputs/PhysioNet_y.csv"
-elif choice == "2":
-    DATASET_NAME = "PASCAL"
-    N_CLASSES = 4
-    CLASS_NAMES = ["Normal", "Murmur", "ExtraHLS", "Artifact"]
-    X_FILE = "outputs/PASCAL_X_reduced.csv"
-    Y_FILE = "outputs/PASCAL_y.csv" # Note: main.py saves as _y.csv now
-else:
-    print("[ERROR] Invalid choice. Exiting.")
-    sys.exit(1)
-
-RANDOM_SEED = 42
-EPOCHS = 100
-BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-
-# ============================================================
-#                     DATA LOADING
-# ============================================================
-
-def load_data():
-    """Loads feature data and labels from CSV files."""
-    try:
-        if not os.path.exists(X_FILE) or not os.path.exists(Y_FILE):
-             # Fallback check for PASCAL_y_dataset.csv if PASCAL_y.csv doesn't exist (backward compatibility)
-             if DATASET_NAME == "PASCAL" and os.path.exists("outputs/PASCAL_y_dataset.csv"):
-                 y_path = "outputs/PASCAL_y_dataset.csv"
-             else:
-                 print(f"[ERROR] Data files not found for {DATASET_NAME}.")
-                 print(f"   Expected: {X_FILE} and {Y_FILE}")
-                 return None, None
-        else:
-            y_path = Y_FILE
-
-        print(f"Loading features from: {X_FILE}")
-        print(f"Loading labels from:   {y_path}")
-
-        X = np.loadtxt(X_FILE, delimiter=",")
-        y = np.loadtxt(y_path, delimiter=",", dtype=int)
-        
-        print(f"[OK] Data loaded for {DATASET_NAME}.")
-        print(f"  Features: {X.shape}")
-        print(f"  Labels: {y.shape}")
-        return X, y
-    except Exception as e:
-        print(f"[ERROR] Error loading data: {e}")
-        return None, None
-
-# ============================================================
-#                     MODEL ARCHITECTURE
-# ============================================================
-
-def create_specific_cnn_model(input_shape, num_classes):
+def plot_training_history(history, fold=None, save_path=None):
     """
-    Implements the CNN architecture from Table 1.
+    Plot training history
+    
+    Args:
+        history: Keras training history
+        fold: Fold number (for k-fold CV)
+        save_path: Path to save the plot
     """
-    model = models.Sequential()
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     
-    # Input Layer (Implicit in first layer)
-    # Layer 2: Convolution1D_1 (64, 11, 1)
-    model.add(layers.Conv1D(filters=64, kernel_size=11, strides=1, padding='same', activation='relu', input_shape=input_shape))
-    # Layer 4: MaxPooling1D_1 (2, 2)
-    model.add(layers.MaxPooling1D(pool_size=2, strides=2))
+    title_suffix = f' (Fold {fold})' if fold else ''
     
-    # Layer 5: Convolution1D_2 (32, 11, 1)
-    model.add(layers.Conv1D(filters=32, kernel_size=11, strides=1, padding='same', activation='relu'))
-    # Layer 7: MaxPooling1D_2 (2, 2)
-    model.add(layers.MaxPooling1D(pool_size=2, strides=2))
+    # Accuracy
+    axes[0].plot(history.history['accuracy'], label='Train')
+    axes[0].plot(history.history['val_accuracy'], label='Validation')
+    axes[0].set_title(f'Model Accuracy{title_suffix}')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Accuracy')
+    axes[0].legend()
+    axes[0].grid(True)
     
-    # Layer 8: Convolution1D_3 (32, 11, 1)
-    model.add(layers.Conv1D(filters=32, kernel_size=11, strides=1, padding='same', activation='relu'))
-    # Layer 10: MaxPooling1D_3 (2, 2)
-    model.add(layers.MaxPooling1D(pool_size=2, strides=2))
-    
-    # Layer 11: Convolution1D_4 (16, 11, 1)
-    model.add(layers.Conv1D(filters=16, kernel_size=11, strides=1, padding='same', activation='relu'))
-    # Layer 13: MaxPooling1D_4 (2, 2)
-    model.add(layers.MaxPooling1D(pool_size=2, strides=2))
-    
-    # Layer 14: Fc_1 (64 neurons)
-    model.add(layers.Flatten())
-    model.add(layers.Dense(64, activation='relu'))
-    
-    # Layer 16: Drop_1 (50%)
-    model.add(layers.Dropout(0.5))
-    
-    # Layer 17: Fc_2 (32 neurons)
-    model.add(layers.Dense(32, activation='relu'))
-    
-    # Layer 18: Output (Softmax)
-    model.add(layers.Dense(num_classes, activation='softmax'))
-    
-    optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
-    
-    model.compile(optimizer=optimizer,
-                  loss='categorical_crossentropy',
-                  metrics=['accuracy'])
-    return model
-
-# ============================================================
-#                     PLOTTING FUNCTIONS
-# ============================================================
-
-def plot_history(history):
-    """Plots training and validation accuracy/loss."""
-    acc = history.history['accuracy']
-    val_acc = history.history['val_accuracy']
-    loss = history.history['loss']
-    val_loss = history.history['val_loss']
-    epochs_range = range(len(acc))
-
-    plt.figure(figsize=(12, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(epochs_range, acc, label='Training Accuracy')
-    plt.plot(epochs_range, val_acc, label='Validation Accuracy')
-    plt.legend(loc='lower right')
-    plt.title('Model Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-
-    plt.subplot(1, 2, 2)
-    plt.plot(epochs_range, loss, label='Training Loss')
-    plt.plot(epochs_range, val_loss, label='Validation Loss')
-    plt.legend(loc='upper right')
-    plt.title('Model Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
+    # Loss
+    axes[1].plot(history.history['loss'], label='Train')
+    axes[1].plot(history.history['val_loss'], label='Validation')
+    axes[1].set_title(f'Model Loss{title_suffix}')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Loss')
+    axes[1].legend()
+    axes[1].grid(True)
     
     plt.tight_layout()
-    plt.savefig(f"outputs/history_plot_{DATASET_NAME}.png")
-    print(f"Saved history plot to outputs/history_plot_{DATASET_NAME}.png")
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Training history plot saved to {save_path}")
+    
     plt.close()
 
-def plot_confusion_matrix(y_true, y_pred, classes):
-    """Plots the confusion matrix."""
+
+def plot_confusion_matrix(y_true, y_pred, classes, save_path=None, title='Confusion Matrix'):
+    """
+    Plot confusion matrix
+    
+    Args:
+        y_true: True labels
+        y_pred: Predicted labels
+        classes: Class names
+        save_path: Path to save the plot
+        title: Plot title
+    """
     cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-    plt.xlabel('Predicted Label')
-    plt.ylabel('True Label')
-    plt.title(f'Confusion Matrix - {DATASET_NAME}')
+    
+    # Normalize
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Raw counts
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=classes, yticklabels=classes, ax=axes[0])
+    axes[0].set_title(f'{title} (Counts)')
+    axes[0].set_xlabel('Predicted')
+    axes[0].set_ylabel('True')
+    
+    # Normalized
+    sns.heatmap(cm_normalized, annot=True, fmt='.2f', cmap='Blues',
+                xticklabels=classes, yticklabels=classes, ax=axes[1])
+    axes[1].set_title(f'{title} (Normalized)')
+    axes[1].set_xlabel('Predicted')
+    axes[1].set_ylabel('True')
+    
     plt.tight_layout()
-    plt.savefig(f"outputs/confusion_matrix_{DATASET_NAME}.png")
-    print(f"Saved confusion matrix to outputs/confusion_matrix_{DATASET_NAME}.png")
-    plt.close()
     
-    # Calculate TP, TN, FP, FN for each class (One-vs-Rest)
-    print("\n--- Detailed Metrics (One-vs-Rest) ---")
-    for i, class_name in enumerate(classes):
-        # Treat class i as Positive, others as Negative
-        tp = cm[i, i]
-        fn = np.sum(cm[i, :]) - tp
-        fp = np.sum(cm[:, i]) - tp
-        tn = np.sum(cm) - tp - fp - fn
-        
-        print(f"Class '{class_name}':")
-        print(f"  TP: {tp}, TN: {tn}, FP: {fp}, FN: {fn}")
-        
-    # Plot TP, TN, FP, FN graph (Four Boxes Graph) for Binary Classification
-    if len(classes) == 2:
-        # Aggregate for the positive class (usually index 1 'Unhealthy' or similar, but let's use index 1)
-        # Assuming index 1 is the "Positive" class of interest (e.g. Unhealthy/Murmur)
-        tp = cm[1, 1]
-        tn = cm[0, 0]
-        fp = cm[0, 1]
-        fn = cm[1, 0]
-        
-        labels = ['True Neg', 'False Pos', 'False Neg', 'True Pos']
-        counts = [tn, fp, fn, tp]
-        
-        plt.figure(figsize=(6, 5))
-        bars = plt.bar(labels, counts, color=['green', 'red', 'red', 'green'])
-        plt.title(f'TP, TN, FP, FN Counts - {DATASET_NAME}')
-        plt.ylabel('Count')
-        for bar in bars:
-            yval = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2, yval, int(yval), va='bottom', ha='center')
-        plt.tight_layout()
-        plt.savefig(f"outputs/tp_tn_fp_fn_plot_{DATASET_NAME}.png")
-        print(f"Saved TP/TN/FP/FN plot to outputs/tp_tn_fp_fn_plot_{DATASET_NAME}.png")
-        plt.close()
-
-def plot_roc_curve(y_test_encoded, y_pred_probs, n_classes, classes):
-    """Plots ROC curve."""
-    plt.figure(figsize=(8, 6))
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Confusion matrix saved to {save_path}")
     
-    # Compute ROC curve and ROC area for each class
-    fpr = dict()
-    tpr = dict()
-    roc_auc = dict()
-    
-    for i in range(n_classes):
-        fpr[i], tpr[i], _ = roc_curve(y_test_encoded[:, i], y_pred_probs[:, i])
-        roc_auc[i] = auc(fpr[i], tpr[i])
-        plt.plot(fpr[i], tpr[i], label=f'ROC curve (area = {roc_auc[i]:.2f}) for {classes[i]}')
-
-    plt.plot([0, 1], [0, 1], 'k--')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title(f'Receiver Operating Characteristic - {DATASET_NAME}')
-    plt.legend(loc="lower right")
-    plt.tight_layout()
-    plt.savefig(f"outputs/roc_curve_{DATASET_NAME}.png")
-    print(f"Saved ROC curve to outputs/roc_curve_{DATASET_NAME}.png")
     plt.close()
 
-# ----------------------------------------------------------------------
-#                             MAIN EXECUTION
-# ----------------------------------------------------------------------
 
-if __name__ == "__main__":
+def plot_cv_results(fold_metrics, save_path=None):
+    """
+    Plot cross-validation results
     
-    print(f"\n=========== Training CNN on {DATASET_NAME} ===========\n")
+    Args:
+        fold_metrics: Dictionary with metrics for each fold
+        save_path: Path to save the plot
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    # 1. Load Data
-    X, y = load_data()
-    if X is None:
-        sys.exit(1)
+    folds = range(1, len(fold_metrics['accuracy']) + 1)
+    
+    # Accuracy
+    axes[0, 0].bar(folds, fold_metrics['accuracy'], color='steelblue', alpha=0.7)
+    axes[0, 0].axhline(y=np.mean(fold_metrics['accuracy']), color='red', 
+                       linestyle='--', label=f'Mean: {np.mean(fold_metrics["accuracy"]):.4f}')
+    axes[0, 0].set_title('Accuracy per Fold')
+    axes[0, 0].set_xlabel('Fold')
+    axes[0, 0].set_ylabel('Accuracy')
+    axes[0, 0].legend()
+    axes[0, 0].set_ylim([0, 1])
+    
+    # Precision
+    axes[0, 1].bar(folds, fold_metrics['precision'], color='forestgreen', alpha=0.7)
+    axes[0, 1].axhline(y=np.mean(fold_metrics['precision']), color='red', 
+                       linestyle='--', label=f'Mean: {np.mean(fold_metrics["precision"]):.4f}')
+    axes[0, 1].set_title('Precision per Fold')
+    axes[0, 1].set_xlabel('Fold')
+    axes[0, 1].set_ylabel('Precision')
+    axes[0, 1].legend()
+    axes[0, 1].set_ylim([0, 1])
+    
+    # Recall
+    axes[1, 0].bar(folds, fold_metrics['recall'], color='darkorange', alpha=0.7)
+    axes[1, 0].axhline(y=np.mean(fold_metrics['recall']), color='red', 
+                       linestyle='--', label=f'Mean: {np.mean(fold_metrics["recall"]):.4f}')
+    axes[1, 0].set_title('Recall per Fold')
+    axes[1, 0].set_xlabel('Fold')
+    axes[1, 0].set_ylabel('Recall')
+    axes[1, 0].legend()
+    axes[1, 0].set_ylim([0, 1])
+    
+    # F1 Score
+    axes[1, 1].bar(folds, fold_metrics['f1'], color='purple', alpha=0.7)
+    axes[1, 1].axhline(y=np.mean(fold_metrics['f1']), color='red', 
+                       linestyle='--', label=f'Mean: {np.mean(fold_metrics["f1"]):.4f}')
+    axes[1, 1].set_title('F1 Score per Fold')
+    axes[1, 1].set_xlabel('Fold')
+    axes[1, 1].set_ylabel('F1 Score')
+    axes[1, 1].legend()
+    axes[1, 1].set_ylim([0, 1])
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"CV results plot saved to {save_path}")
+    
+    plt.close()
 
-    # 2. Prepare Data
-    # Reshape X for 1D CNN: (N_samples, N_features, 1)
-    if len(X.shape) == 1:
-        X = X.reshape(1, -1)
+
+def train_with_kfold(model_type='paper', dataset_name='PASCAL', epochs=EPOCHS, batch_size=BATCH_SIZE, 
+                     k_folds=K_FOLDS):
+    """
+    Train with K-Fold Cross-Validation as specified in the paper
+    
+    Args:
+        model_type: Type of model ('paper', 'bn', 'adaptive')
+        epochs: Number of training epochs
+        batch_size: Batch size
+        k_folds: Number of folds for cross-validation
+    
+    Returns:
+        Best model and metrics
+    """
+    import pickle
+    
+    set_seeds()
+    
+    print("="*60)
+    print(f"HEART SOUND CLASSIFICATION ({dataset_name}) - 1D-LBP/LTP + CNN")
+    print("Based on: Er, Mehmet Bilal - Applied Acoustics 2021")
+    print("="*60)
+    print(f"Model: 1D-CNN ({model_type})")
+    print(f"Epochs: {epochs}")
+    print(f"Batch size: {batch_size}")
+    print(f"K-Folds: {k_folds}")
+    print("="*60)
+    
+    # Load and prepare data
+    print("\n[1/3] Extracting 1D-LBP and 1D-LTP features...")
+    X, y, selected_indices = load_dataset(dataset_name=dataset_name, augment=True)  # Enable augmentation
+    
+    print(f"\nDataset shape: {X.shape}")
+    print(f"Labels shape: {y.shape}")
+    print(f"Class distribution: {np.bincount(y)}")
+    
+    # Save feature indices for inference
+    if selected_indices is not None:
+        indices_path = os.path.join(MODEL_SAVE_PATH, 'feature_indices.pkl')
+        with open(indices_path, 'wb') as f:
+            pickle.dump(selected_indices, f)
+        print(f"Saved {len(selected_indices)} feature indices to {indices_path}")
+    
+    # Fit and save scaler on full dataset
+    full_scaler = StandardScaler()
+    full_scaler.fit(X)
+    scaler_path = os.path.join(MODEL_SAVE_PATH, 'scaler.pkl')
+    with open(scaler_path, 'wb') as f:
+        pickle.dump(full_scaler, f)
+    print(f"Saved scaler to {scaler_path}")
+    
+    # Initialize k-fold
+    skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=RANDOM_SEED)
+    
+    # Store metrics for each fold
+    fold_metrics = {
+        'accuracy': [], 'precision': [], 'recall': [], 'f1': [], 
+        'loss': [], 'val_accuracy': []
+    }
+    all_y_true = []
+    all_y_pred = []
+    
+    best_model = None
+    best_accuracy = 0
+    
+    # Results directory
+    results_dir = os.path.join(MODEL_SAVE_PATH, 'results')
+    os.makedirs(results_dir, exist_ok=True)
+    
+    print(f"\n[2/3] Starting {k_folds}-Fold Cross-Validation...")
+    print("-" * 60)
+    
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+        print(f"\n{'='*20} FOLD {fold}/{k_folds} {'='*20}")
         
-    n_features = X.shape[1]
-    X_reshaped = X.reshape(X.shape[0], n_features, 1)
+        # Split data
+        X_train, X_val = X[train_idx].copy(), X[val_idx].copy()
+        y_train, y_val = y[train_idx], y[val_idx]
+        
+        # Normalize features (fit on train, transform on val)
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_val = scaler.transform(X_val)
+        
+        # Reshape for Conv1D: (samples, features, 1)
+        X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+        X_val = X_val.reshape(X_val.shape[0], X_val.shape[1], 1)
+        
+        print(f"Train set: {X_train.shape[0]} samples")
+        print(f"Val set: {X_val.shape[0]} samples")
+        
+        # Get input shape
+        input_shape = (X_train.shape[1], 1)
+        
+        # Build model (fresh model for each fold)
+        model = get_model(model_type, input_shape)
+        
+        # Get callbacks (with fold-specific checkpoint)
+        fold_checkpoint = os.path.join(MODEL_SAVE_PATH, f'fold_{fold}_best.keras')
+        callbacks = get_callbacks(checkpoint_path=fold_checkpoint, patience=30)
+        
+        # Train
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        # Plot training history for this fold
+        plot_training_history(
+            history, fold=fold,
+            save_path=os.path.join(results_dir, f'fold_{fold}_history.png')
+        )
+        
+        # Evaluate on validation set
+        y_pred = np.argmax(model.predict(X_val, verbose=0), axis=1)
+        
+        # Calculate metrics
+        acc = accuracy_score(y_val, y_pred)
+        prec = precision_score(y_val, y_pred, average='weighted', zero_division=0)
+        rec = recall_score(y_val, y_pred, average='weighted', zero_division=0)
+        f1 = f1_score(y_val, y_pred, average='weighted', zero_division=0)
+        
+        fold_metrics['accuracy'].append(acc)
+        fold_metrics['precision'].append(prec)
+        fold_metrics['recall'].append(rec)
+        fold_metrics['f1'].append(f1)
+        fold_metrics['val_accuracy'].append(max(history.history['val_accuracy']))
+        
+        # Collect predictions for overall confusion matrix
+        all_y_true.extend(y_val)
+        all_y_pred.extend(y_pred)
+        
+        print(f"\nFold {fold} Results:")
+        print(f"  Accuracy:  {acc:.4f}")
+        print(f"  Precision: {prec:.4f}")
+        print(f"  Recall:    {rec:.4f}")
+        print(f"  F1 Score:  {f1:.4f}")
+        
+        # Keep best model
+        if acc > best_accuracy:
+            best_accuracy = acc
+            best_model = model
+            print(f"  *** New best model (Acc: {acc:.4f}) ***")
+        
+        # Clear session to free memory
+        tf.keras.backend.clear_session()
     
-    # One-hot encode labels
-    y_encoded = to_categorical(y, num_classes=N_CLASSES)
+    # Summary
+    print("\n" + "="*60)
+    print("[3/3] CROSS-VALIDATION RESULTS SUMMARY")
+    print("="*60)
     
-    # 3. Split Data (Stratified)
+    print(f"\nAccuracy:  {np.mean(fold_metrics['accuracy']):.4f} ± {np.std(fold_metrics['accuracy']):.4f}")
+    print(f"Precision: {np.mean(fold_metrics['precision']):.4f} ± {np.std(fold_metrics['precision']):.4f}")
+    print(f"Recall:    {np.mean(fold_metrics['recall']):.4f} ± {np.std(fold_metrics['recall']):.4f}")
+    print(f"F1 Score:  {np.mean(fold_metrics['f1']):.4f} ± {np.std(fold_metrics['f1']):.4f}")
+    
+    # Plot CV results
+    plot_cv_results(fold_metrics, save_path=os.path.join(results_dir, 'cv_results.png'))
+    
+    # Plot overall confusion matrix
+    from config import DATASET_CONFIG
+    classes = DATASET_CONFIG[dataset_name]['classes']
+    plot_confusion_matrix(
+        all_y_true, all_y_pred, classes,
+        save_path=os.path.join(results_dir, 'confusion_matrix_overall.png'),
+        title='Overall Confusion Matrix (All Folds)'
+    )
+    
+    # Classification report
+    print("\nOverall Classification Report:")
+    print("-" * 50)
+    print(classification_report(all_y_true, all_y_pred, target_names=classes))
+    
+    # Save best model
+    if best_model is not None:
+        best_model_path = os.path.join(MODEL_SAVE_PATH, 'best_model.keras')
+        best_model.save(best_model_path)
+        print(f"\nBest model saved to {best_model_path}")
+    
+    return best_model, fold_metrics
+
+
+def train_simple(model_type='paper', dataset_name='PASCAL', epochs=EPOCHS, batch_size=BATCH_SIZE):
+    """
+    Simple train/test split training (no cross-validation)
+    Faster alternative for quick experiments
+    
+    Args:
+        model_type: Type of model ('paper', 'bn', 'adaptive')
+        epochs: Number of training epochs
+        batch_size: Batch size
+    
+    Returns:
+        Trained model, history, and metrics
+    """
+    from sklearn.model_selection import train_test_split
+    
+    set_seeds()
+    
+    print("="*60)
+    print(f"HEART SOUND CLASSIFICATION ({dataset_name}) - Simple Train/Test Split")
+    print("="*60)
+    
+    # Load and prepare data
+    print("\n[1/4] Extracting 1D-LBP and 1D-LTP features...")
+    X, y, _ = load_dataset(dataset_name=dataset_name, augment=True)  # Enable augmentation
+    
+    print(f"\nDataset shape: {X.shape}")
+    
+    # Split data
+    print("\n[2/4] Splitting data...")
     X_train, X_test, y_train, y_test = train_test_split(
-        X_reshaped, y_encoded, test_size=0.3, random_state=RANDOM_SEED, stratify=y
+        X, y, test_size=0.2, stratify=y, random_state=RANDOM_SEED
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, stratify=y_train, random_state=RANDOM_SEED
     )
     
-    # Convert one-hot back to integers for metrics/weights
-    y_train_int = np.argmax(y_train, axis=1)
-    y_test_int = np.argmax(y_test, axis=1)
-
-    print(f"Train size: {len(y_train)}, Test size: {len(y_test)}")
+    # Normalize features
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_val = scaler.transform(X_val)
+    X_test = scaler.transform(X_test)
     
-    # 4. Handle Class Imbalance
-    class_weights = compute_class_weight(
-        'balanced', 
-        classes=np.unique(y_train_int), 
-        y=y_train_int
-    )
-    class_weight_dict = dict(enumerate(class_weights))
-    print(f"Class Weights: {class_weight_dict}")
-
-    # 5. Create and Train Model
-    model = create_specific_cnn_model(input_shape=(n_features, 1), num_classes=N_CLASSES)
+    # Reshape for Conv1D
+    X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+    X_val = X_val.reshape(X_val.shape[0], X_val.shape[1], 1)
+    X_test = X_test.reshape(X_test.shape[0], X_test.shape[1], 1)
+    
+    print(f"Train: {X_train.shape[0]}, Val: {X_val.shape[0]}, Test: {X_test.shape[0]}")
+    
+    # Build model
+    print(f"\n[3/4] Building {model_type} model...")
+    input_shape = (X_train.shape[1], 1)
+    model = get_model(model_type, input_shape)
     model.summary()
     
-    # Callbacks
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1)
-    early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True, verbose=1)
+    # Train
+    print(f"\n[4/4] Training for {epochs} epochs...")
+    callbacks = get_callbacks()
     
-    print("\n--- Starting Training ---")
     history = model.fit(
         X_train, y_train,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        validation_data=(X_test, y_test),
-        class_weight=class_weight_dict,
-        callbacks=[reduce_lr, early_stop],
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
         verbose=1
     )
     
-    # 6. Evaluation & Plotting
-    print("\n--- Final Evaluation ---")
+    # Evaluate
+    print("\n" + "="*50)
+    print("TEST SET EVALUATION")
+    print("="*50)
     
-    # Predict
-    y_pred_probs = model.predict(X_test)
-    y_pred = np.argmax(y_pred_probs, axis=1)
+    y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
     
-    # Metrics
-    acc = accuracy_score(y_test_int, y_pred)
-    prec = precision_score(y_test_int, y_pred, average='weighted')
-    rec = recall_score(y_test_int, y_pred, average='weighted') # Sensitivity
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
     
-    print(f"\nAccuracy:    {acc*100:.2f}%")
-    print(f"Precision:   {prec*100:.2f}%")
-    print(f"Sensitivity: {rec*100:.2f}%")
+    print(f"\nAccuracy:  {acc:.4f}")
+    print(f"Precision: {prec:.4f}")
+    print(f"Recall:    {rec:.4f}")
+    print(f"F1 Score:  {f1:.4f}")
     
     print("\nClassification Report:")
-    print(classification_report(y_test_int, y_pred, target_names=CLASS_NAMES))
+    from config import DATASET_CONFIG
+    classes = DATASET_CONFIG[dataset_name]['classes']
+    print(classification_report(y_test, y_pred, target_names=classes))
     
-    # Plots
-    plot_history(history)
-    plot_confusion_matrix(y_test_int, y_pred, CLASS_NAMES)
-    plot_roc_curve(y_test, y_pred_probs, N_CLASSES, CLASS_NAMES)
+    # Results directory
+    results_dir = os.path.join(MODEL_SAVE_PATH, 'results')
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Plot results
+    plot_training_history(history, save_path=os.path.join(results_dir, 'training_history.png'))
+    plot_confusion_matrix(y_test, y_pred, classes, 
+                          save_path=os.path.join(results_dir, 'confusion_matrix.png'))
+    
+    # Save model
+    model_path = os.path.join(MODEL_SAVE_PATH, 'final_model.keras')
+    model.save(model_path)
+    print(f"\nModel saved to {model_path}")
+    
+    metrics = {'accuracy': acc, 'precision': prec, 'recall': rec, 'f1': f1}
+    
+    return model, history, metrics
 
-    # Save Model
-    model_save_path = f"outputs/cnn_model_{DATASET_NAME}.h5"
-    model.save(model_save_path)
-    print(f"Model saved to {model_save_path}")
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Train Heart Sound Classification Model')
+    parser.add_argument('--mode', type=str, default='kfold', choices=['kfold', 'simple'],
+                        help='Training mode: kfold (10-fold CV) or simple (train/test split)')
+    parser.add_argument('--model', type=str, default='adaptive', choices=['paper', 'bn', 'adaptive'],
+                        help='Model type: paper (exact architecture), bn (with batch norm), adaptive')
+    parser.add_argument('--epochs', type=int, default=EPOCHS, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=BATCH_SIZE, help='Batch size')
+    parser.add_argument('--dataset', type=str, default='PASCAL', choices=['PASCAL', 'Physionet'],
+                        help='Dataset to use: PASCAL or Physionet')
+    
+    args = parser.parse_args()
+    
+    print("\n" + "="*60)
+    print("Heart Sound Classification using 1D-LBP/LTP + 1D-CNN")
+    print("="*60)
+    
+    if args.mode == 'kfold':
+        # 10-Fold Cross-Validation (as in paper)
+        best_model, fold_metrics = train_with_kfold(
+            model_type=args.model,
+            dataset_name=args.dataset,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            k_folds=K_FOLDS
+        )
+        
+        print("\n" + "="*60)
+        print("TRAINING COMPLETE!")
+        print("="*60)
+        print(f"Mean Accuracy: {np.mean(fold_metrics['accuracy']):.4f}")
+        print(f"Mean F1 Score: {np.mean(fold_metrics['f1']):.4f}")
+        
+    else:
+        # Simple train/test split
+        model, history, metrics = train_simple(
+            model_type=args.model,
+            dataset_name=args.dataset,
+            epochs=args.epochs,
+            batch_size=args.batch_size
+        )
+        
+        print("\n" + "="*60)
+        print("TRAINING COMPLETE!")
+        print("="*60)
+        print(f"Test Accuracy: {metrics['accuracy']:.4f}")
+        print(f"Test F1 Score: {metrics['f1']:.4f}")
